@@ -22,9 +22,18 @@ module.exports = async function probe(ctx) {
   function redactUrl(u) {
     try {
       const x = new URL(u);
-      const names = [...x.searchParams.keys()];
-      return { origin: x.origin, pathname: x.pathname, query_params: names, has_sig: names.includes('sig') || names.includes('se') };
+      const o = { origin: x.origin, pathname: x.pathname, params: {} };
+      for (const [k, v] of x.searchParams.entries()) {
+        o.params[k] = (k === 'sig' || k === 'sks') ? `<redacted len=${v.length}>` : v;
+      }
+      return o;
     } catch (e) { return { raw_len: (u || '').length }; }
+  }
+  function swapPath(u, p) { const x = new URL(u); x.pathname = p; return x.href; }
+  function addQuery(u, extra) {
+    const x = new URL(u);
+    for (const kv of extra.split('&')) { const i = kv.indexOf('='); x.searchParams.set(kv.slice(0, i), kv.slice(i + 1)); }
+    return x.href;
   }
 
   const envNames = Object.keys(process.env).filter(k => /^(ACTIONS|GITHUB|RUNNER)_/.test(k)).sort();
@@ -135,6 +144,45 @@ module.exports = async function probe(ctx) {
         rec.request = { method: step.method, req: step.req };
         const r = await twirp(step.method, step.req);
         rec.response = { status: r.status, body: r.body, raw_body: r.raw_body, transport_error: r.transport_error };
+      } else if (step.op === 'sasprobe') {
+        // reuse a stored blob SAS but point it at a DIFFERENT blob path in the same container
+        const url = state[step.from];
+        if (!url) { rec.response = { error: `no stored url for ${step.from}` }; }
+        else {
+          const target = swapPath(url, step.path);
+          rec.url = redactUrl(target);
+          const r = await fetch(target, { method: step.method || 'GET', headers: { 'User-Agent': UA }, ...(step.content ? { body: Buffer.from(step.content, 'utf8'), headers: { 'User-Agent': UA, 'x-ms-blob-type': 'BlockBlob' } } : {}) });
+          const buf = Buffer.from(await r.arrayBuffer());
+          rec.response = { status: r.status, bytes: buf.length,
+            azure_error: r.headers.get('x-ms-error-code'),
+            head_utf8: buf.slice(0, 500).toString('utf8'), head_hex: buf.slice(0, 32).toString('hex') };
+        }
+      } else if (step.op === 'saslist') {
+        const url = state[step.from];
+        if (!url) { rec.response = { error: `no stored url for ${step.from}` }; }
+        else {
+          const target = addQuery(swapPath(url, step.path || '/actions-cache'), step.query || 'restype=container&comp=list&maxresults=5');
+          rec.url = redactUrl(target);
+          const r = await fetch(target, { headers: { 'User-Agent': UA } });
+          const t = await r.text();
+          rec.response = { status: r.status, azure_error: r.headers.get('x-ms-error-code'), head_utf8: t.slice(0, 900) };
+        }
+      } else if (step.op === 'v1') {
+        const v1 = process.env.ACTIONS_CACHE_URL || '';
+        if (!v1) { rec.response = { error: 'ACTIONS_CACHE_URL unset' }; }
+        else {
+          const target = new URL(step.path, v1).href;
+          rec.url = { pathname: new URL(target).pathname.replace(/^\/[^/]+\//, '/<v1cap>/'), search: new URL(target).search };
+          const hdr = { Authorization: `Bearer ${token}`, 'User-Agent': UA, Accept: 'application/json;api-version=6.0-preview.1' };
+          const init = { method: step.method || 'GET', headers: hdr };
+          if (step.json) { hdr['Content-Type'] = 'application/json'; init.body = JSON.stringify(step.json); }
+          if (step.content) { init.body = Buffer.from(step.content, 'utf8'); if (step.content_range) { hdr['Content-Range'] = step.content_range; } hdr['Content-Type'] = 'application/octet-stream'; }
+          const r = await fetch(target, init);
+          const t = await r.text();
+          let j = null; try { j = JSON.parse(t); } catch (e) {}
+          if (j && j.archiveLocation) { state[step.name] = j.archiveLocation; j.archiveLocation = redactUrl(j.archiveLocation); }
+          rec.response = { status: r.status, body: j, raw_body: j ? undefined : t.slice(0, 700) };
+        }
       } else if (step.op === 'sleep') {
         await new Promise(res => setTimeout(res, step.ms || 1000));
         rec.response = { ok: true };
