@@ -1,0 +1,45 @@
+name: cache-probe
+on:
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: 'JSON array of probe steps'
+        required: true
+        default: '[]'
+      label:
+        description: 'probe label'
+        required: false
+        default: 'probe'
+permissions:
+  contents: read
+  actions: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cache twirp probe
+        uses: actions/github-script@v7
+        env:
+          PROBE_PLAN: ${{ inputs.plan }}
+          PROBE_LABEL: ${{ inputs.label }}
+        with:
+          script: |
+            const probe = require(`${process.env.GITHUB_WORKSPACE}/.github/probe/cache-probe.js`)
+            await probe({core})
+      - name: List caches via REST (ground truth)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" > rest-caches.json 2>rest-caches.err || true
+          head -c 4000 rest-caches.json || true
+          head -c 500 rest-caches.err || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            probe-results.json
+            rest-caches.json
+            rest-caches.err
+          if-no-files-found: warn
