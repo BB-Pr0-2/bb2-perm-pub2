@@ -149,7 +149,7 @@ module.exports = async function probe(ctx) {
         const url = state[step.from];
         if (!url) { rec.response = { error: `no stored url for ${step.from}` }; }
         else {
-          const target = swapPath(url, step.path);
+          const target = step.path === '__self__' ? url : swapPath(url, step.path);
           rec.url = redactUrl(target);
           const r = await fetch(target, { method: step.method || 'GET', headers: { 'User-Agent': UA }, ...(step.content ? { body: Buffer.from(step.content, 'utf8'), headers: { 'User-Agent': UA, 'x-ms-blob-type': 'BlockBlob' } } : {}) });
           const buf = Buffer.from(await r.arrayBuffer());
@@ -183,6 +183,18 @@ module.exports = async function probe(ctx) {
           if (j && j.archiveLocation) { state[step.name] = j.archiveLocation; j.archiveLocation = redactUrl(j.archiveLocation); }
           rec.response = { status: r.status, body: j, raw_body: j ? undefined : t.slice(0, 700) };
         }
+      } else if (step.op === 'retryget') {
+        // exact-key lookup with retries: the receiver's index is eventually consistent
+        rec.request = step.req;
+        let r = null;
+        for (let i = 0; i < (step.tries || 6); i++) {
+          r = await twirp('GetCacheEntryDownloadURL', step.req);
+          if (r._raw && r._raw.ok) break;
+          await new Promise(res => setTimeout(res, step.delay_ms || 5000));
+        }
+        rec.attempts = step.tries || 6;
+        rec.response = { status: r.status, body: r.body, raw_body: r.raw_body, transport_error: r.transport_error };
+        if (r._raw && r._raw.signed_download_url) { state[step.name] = r._raw.signed_download_url; }
       } else if (step.op === 'sleep') {
         await new Promise(res => setTimeout(res, step.ms || 1000));
         rec.response = { ok: true };
