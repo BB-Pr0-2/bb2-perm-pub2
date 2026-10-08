@@ -1,0 +1,64 @@
+name: seed-pub2
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+  id-token: write
+  attestations: write
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: seed bot-authored objects in pub2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          H1: "1"
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          T = os.environ['GH_TOKEN']; R = 'BB-Pr0-2/bb2-perm-pub2'
+          def call(m, u, b=None):
+              h = {'Authorization': 'Bearer ' + T, 'Accept': 'application/vnd.github+json', 'User-Agent': 'seed-pub2'}
+              d = json.dumps(b).encode() if b is not None else None
+              if d: h['Content-Type'] = 'application/json'
+              try:
+                  with urllib.request.urlopen(urllib.request.Request('https://api.github.com' + u, d, h, method=m), timeout=40) as r:
+                      return r.status, json.loads(r.read() or b'null')
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read()[:300].decode()
+          out = {}
+          st, j = call('POST', f'/repos/{R}/issues', {'title': 'BOT_I2 issue authored by github-actions[bot] in pub2', 'body': 'seeded'})
+          out['BOT_I2'] = {'status': st, 'number': j.get('number'), 'id': j.get('id'), 'node_id': j.get('node_id')} if isinstance(j, dict) else {'status': st, 'err': j}
+          for k in ['BOT_C2', 'BOT_C2_DEL']:
+              st, j = call('POST', f'/repos/{R}/issues/1/comments', {'body': k + ' comment authored by github-actions[bot] in pub2'})
+              out[k] = {'status': st, 'id': j.get('id'), 'node_id': j.get('node_id')} if isinstance(j, dict) else {'status': st, 'err': j}
+          st, j = call('POST', '/graphql', {'query': '{ repository(owner:"BB-Pr0-2", name:"bb2-perm-pub2"){ id discussionCategories(first:10){ nodes{ id name } } } }'})
+          repo = j['data']['repository']; cat = [c['id'] for c in repo['discussionCategories']['nodes'] if c['name'] == 'Q&A'][0]
+          st, j = call('POST', '/graphql', {'query': 'mutation($r:ID!,$c:ID!){ createDiscussion(input:{repositoryId:$r, categoryId:$c, title:"BOT_D2 discussion by github-actions[bot] in pub2", body:"seeded"}){ discussion{ id number } } }', 'variables': {'r': repo['id'], 'c': cat}})
+          out['BOT_D2'] = j
+          json.dump(out, open('seed-pub2.json', 'w'), indent=1)
+          print(json.dumps(out, indent=1))
+          PY
+      - name: make attestation subject
+        run: printf 'bb2-perm-pub2 attestation subject %s\n' "$GITHUB_RUN_ID" > subject.txt && sha256sum subject.txt
+      - uses: actions/attest-build-provenance@v2
+        id: att
+        with:
+          subject-path: subject.txt
+      - name: record attestation
+        env:
+          ATT_ID: ${{ steps.att.outputs.attestation-id }}
+          ATT_URL: ${{ steps.att.outputs.attestation-url }}
+        run: |
+          python3 - <<'PY'
+          import json, os, hashlib
+          d = json.load(open('seed-pub2.json'))
+          d['attestation'] = {'id': os.environ.get('ATT_ID'), 'url': os.environ.get('ATT_URL'), 'digest': 'sha256:' + hashlib.sha256(open('subject.txt','rb').read()).hexdigest()}
+          json.dump(d, open('seed-pub2.json', 'w'), indent=1); print(d['attestation'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-pub2
+          path: seed-pub2.json
